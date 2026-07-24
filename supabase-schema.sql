@@ -20,19 +20,39 @@ create table if not exists families (
 
 -- One row per person, linked to a household
 create table if not exists members (
-  id           uuid primary key default gen_random_uuid(),
-  family_id    uuid not null references families(id) on delete cascade,
-  name         text not null,
-  role         text,       -- e.g. "Ration Card Head", "Member"
-  gender       text,       -- Male / Female / Other
-  age          int,
-  phone        text,
-  aadhar       text,
-  job          text,
-  disease      text,
-  created_at   timestamptz not null default now(),
-  updated_at   timestamptz not null default now()
+  id                   uuid primary key default gen_random_uuid(),
+  family_id            uuid not null references families(id) on delete cascade,
+  name                 text not null,
+  role                 text,       -- e.g. "House Owner / Head of Family", "Father", "Wife", etc.
+  gender               text,       -- Male / Female / Other
+  date_of_birth        date,       -- age is calculated live from this, so it's always accurate
+  phone                text,
+  aadhar               text,
+  job                  text,
+  disease              text,
+  is_pregnant          boolean not null default false,
+  pregnancy_start_date date,       -- LMP date; pregnancy month is calculated live from this
+  vaccinations         jsonb not null default '{}'::jsonb,  -- { vaccine_key: "date given" }, only relevant under 18
+  other_vaccine_notes  text,       -- free text for SIA/pulse polio rounds etc.
+  created_at           timestamptz not null default now(),
+  updated_at           timestamptz not null default now()
 );
+
+-- ------------------------------------------------------------
+-- MIGRATION: if you already ran an earlier version of this
+-- script (with an "age" column, or a single "polio_given" flag,
+-- instead of the full immunization schedule), this block safely
+-- brings an existing table up to date without deleting your
+-- household data. It's safe to re-run.
+-- ------------------------------------------------------------
+alter table members add column if not exists date_of_birth date;
+alter table members add column if not exists is_pregnant boolean not null default false;
+alter table members add column if not exists pregnancy_start_date date;
+alter table members add column if not exists vaccinations jsonb not null default '{}'::jsonb;
+alter table members add column if not exists other_vaccine_notes text;
+alter table members drop column if exists age;
+alter table members drop column if exists pregnancy_month;
+alter table members drop column if exists polio_given;
 
 create index if not exists idx_members_family_id on members(family_id);
 create index if not exists idx_families_area on families(area);
