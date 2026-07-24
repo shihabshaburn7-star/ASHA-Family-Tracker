@@ -57,6 +57,46 @@ const ROLE_OPTIONS = [
   "Other Relative",
 ];
 const GENDER_OPTIONS = ["Male", "Female", "Other"];
+
+// Standard child immunization schedule (matches the national/Kerala UIP
+// chart). Each vaccine is stored as a date (when it was given); if the
+// date is filled in, it shows as a tick — if empty, a cross.
+const VACCINE_SCHEDULE = [
+  { key: "bcg", label: "BCG", age: "At birth" },
+  { key: "opv0", label: "OPV - 0", age: "At birth" },
+  { key: "hepb_birth", label: "Hepatitis B (birth dose)", age: "At birth" },
+  { key: "opv1", label: "OPV - 1", age: "6 weeks (1½ mo)" },
+  { key: "penta1", label: "Pentavalent - 1", age: "6 weeks (1½ mo)" },
+  { key: "rota1", label: "Rotavirus - 1", age: "6 weeks (1½ mo)" },
+  { key: "fipv1", label: "fIPV - 1", age: "6 weeks (1½ mo)" },
+  { key: "pcv1", label: "PCV - 1", age: "6 weeks (1½ mo)" },
+  { key: "opv2", label: "OPV - 2", age: "10 weeks (2½ mo)" },
+  { key: "penta2", label: "Pentavalent - 2", age: "10 weeks (2½ mo)" },
+  { key: "rota2", label: "Rotavirus - 2", age: "10 weeks (2½ mo)" },
+  { key: "opv3", label: "OPV - 3", age: "14 weeks (3½ mo)" },
+  { key: "penta3", label: "Pentavalent - 3", age: "14 weeks (3½ mo)" },
+  { key: "rota3", label: "Rotavirus - 3", age: "14 weeks (3½ mo)" },
+  { key: "fipv2", label: "fIPV - 2", age: "14 weeks (3½ mo)" },
+  { key: "pcv2", label: "PCV - 2", age: "14 weeks (3½ mo)" },
+  { key: "mr1", label: "MR - 1 (Measles-Rubella)", age: "9 months" },
+  { key: "je1", label: "JE - 1", age: "9 months" },
+  { key: "vitA1", label: "Vitamin A - 1", age: "9 months" },
+  { key: "dpt_b1", label: "DPT Booster - 1", age: "16–24 months" },
+  { key: "opv_booster", label: "OPV Booster", age: "16–24 months" },
+  { key: "mr2", label: "MR - 2", age: "16–24 months" },
+  { key: "je2", label: "JE - 2", age: "16–24 months" },
+  { key: "vitA2", label: "Vitamin A - 2", age: "16–24 months" },
+  { key: "vitA3", label: "Vitamin A - 3", age: "2 years" },
+  { key: "vitA4", label: "Vitamin A - 4", age: "2½ years" },
+  { key: "vitA5", label: "Vitamin A - 5", age: "3 years" },
+  { key: "vitA6", label: "Vitamin A - 6", age: "3½ years" },
+  { key: "vitA7", label: "Vitamin A - 7", age: "4 years" },
+  { key: "vitA8", label: "Vitamin A - 8", age: "4½ years" },
+  { key: "vitA9", label: "Vitamin A - 9", age: "5 years" },
+  { key: "dpt_b2", label: "DPT Booster - 2", age: "5–6 years" },
+  { key: "td1", label: "TT / Td - 1", age: "10 years" },
+  { key: "td2", label: "TT / Td - 2", age: "16 years" },
+];
 const AGE_PRESETS = [
   { label: "Infant (0–1)", min: 0, max: 1 },
   { label: "Child (1–18)", min: 1, max: 18 },
@@ -264,6 +304,32 @@ function applyData(families, members) {
   });
 }
 
+// Immunization data is only relevant for children — once someone turns
+// 18, their vaccine dates and any "other/SIA" note are cleared out for
+// good (both from what's shown and from the database). This mutates the
+// given member objects in place and pushes the change to Supabase.
+async function purgeAdultVaccinations(members) {
+  const idsToClear = [];
+  (members || []).forEach((m) => {
+    const age = calcAge(m.date_of_birth);
+    const hasData = (m.vaccinations && Object.keys(m.vaccinations).length > 0) || m.other_vaccine_notes;
+    if (age !== null && age >= 18 && hasData) {
+      m.vaccinations = {};
+      m.other_vaccine_notes = null;
+      idsToClear.push(m.id);
+    }
+  });
+  if (idsToClear.length) {
+    try {
+      await sb.from("members")
+        .update({ vaccinations: {}, other_vaccine_notes: null, updated_at: new Date().toISOString() })
+        .in("id", idsToClear);
+      toast(`Cleared childhood immunization records for ${idsToClear.length} member(s) who turned 18.`);
+    } catch (e) { /* if this fails, it'll simply retry on the next load */ }
+  }
+  return idsToClear;
+}
+
 async function loadData({ silent = false } = {}) {
   const cached = !silent ? readCache() : null;
 
@@ -293,6 +359,7 @@ async function loadData({ silent = false } = {}) {
   }
 
   applyData(families, members);
+  await purgeAdultVaccinations(members);
   saveCache(families || [], members || []);
   renderShell();
 }
@@ -338,6 +405,76 @@ function renderShell() {
 // ------------------------------------------------------------
 // ADD FAMILY TAB
 // ------------------------------------------------------------
+
+// Immunization is only tracked for children under 18 — this returns
+// how many of the scheduled vaccines have a date recorded.
+function vaccSummary(vaccinations) {
+  const v = vaccinations || {};
+  const total = VACCINE_SCHEDULE.length;
+  const given = VACCINE_SCHEDULE.filter((vac) => v[vac.key] && String(v[vac.key]).trim()).length;
+  return { given, total };
+}
+
+// Builds the scrollable immunization checklist table. `prefix`/`idx`
+// produce unique data hooks so the same markup works in the Add Family
+// form, the inline edit form, and the inline add-member form.
+function immunizationChecklistHtml(prefix, idx, vaccinations, otherNotes) {
+  const v = vaccinations || {};
+  const rows = VACCINE_SCHEDULE.map((vac) => `
+    <tr>
+      <td>${escapeHtml(vac.label)}</td>
+      <td style="color:var(--ink-soft);font-size:0.78rem;">${escapeHtml(vac.age)}</td>
+      <td><input type="date" class="vacc-date-input" data-prefix="${prefix}" data-idx="${idx}" data-key="${vac.key}" value="${escapeHtml(v[vac.key] || "")}" /></td>
+      <td class="vacc-status" data-prefix="${prefix}" data-idx="${idx}" data-key="${vac.key}" style="text-align:center;">
+        ${v[vac.key] ? `<span class="polio-tick">✓</span>` : `<span class="polio-cross">✗</span>`}
+      </td>
+    </tr>`).join("");
+  return `
+    <div class="immunization-block" data-immun-for="${prefix}${idx}">
+      <h4 style="margin:14px 0 8px;font-size:0.92rem;color:var(--rose-dark);">Immunization record (under 18 only)</h4>
+      <div style="max-height:260px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;">
+        <table class="member-table" style="font-size:0.8rem;">
+          <thead><tr><th>Vaccine</th><th>Recommended age</th><th>Date given</th><th>Status</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div style="margin-top:8px;">
+        <label>Other / SIA round vaccines given (name &amp; date)</label>
+        <input type="text" class="vacc-other-input" data-prefix="${prefix}" data-idx="${idx}" value="${escapeHtml(otherNotes)}" placeholder="e.g. Pulse Polio booster, 12 Jan 2026" />
+      </div>
+    </div>`;
+}
+
+function collectVaccinationsFromForm(prefix, idx) {
+  const vaccinations = {};
+  document.querySelectorAll(`.vacc-date-input[data-prefix="${prefix}"][data-idx="${idx}"]`).forEach((inp) => {
+    if (inp.value) vaccinations[inp.dataset.key] = inp.value;
+  });
+  const otherInput = document.querySelector(`.vacc-other-input[data-prefix="${prefix}"][data-idx="${idx}"]`);
+  return { vaccinations, other_vaccine_notes: otherInput ? (otherInput.value.trim() || null) : null };
+}
+
+// Show/hide the immunization block based on computed age from DOB —
+// only children under 18 need it. Also keeps each row's tick/cross live.
+function attachImmunizationToggle() {
+  document.querySelectorAll(".dob-input").forEach((inp) => {
+    const sync = () => {
+      const block = document.querySelector(`[data-immun-for="${inp.dataset.prefix}${inp.dataset.idx}"]`);
+      if (!block) return;
+      const age = calcAge(inp.value);
+      block.classList.toggle("hidden", !(inp.value && age !== null && age < 18));
+    };
+    inp.onchange = sync;
+    sync();
+  });
+  document.querySelectorAll(".vacc-date-input").forEach((inp) => {
+    inp.oninput = () => {
+      const statusCell = document.querySelector(`.vacc-status[data-prefix="${inp.dataset.prefix}"][data-idx="${inp.dataset.idx}"][data-key="${inp.dataset.key}"]`);
+      if (statusCell) statusCell.innerHTML = inp.value ? `<span class="polio-tick">✓</span>` : `<span class="polio-cross">✗</span>`;
+    };
+  });
+}
+
 function pregnancyFieldsHtml(idx, data, prefix) {
   const show = data.gender === "Female";
   const currentMonth = calcPregnancyMonth(data.pregnancy_start_date);
@@ -372,18 +509,14 @@ function memberFormRow(idx, data = {}) {
             ${GENDER_OPTIONS.map((g) => `<option ${data.gender === g ? "selected" : ""}>${g}</option>`).join("")}
           </select>
         </div>
-        <div><label>Date of birth</label><input type="date" name="m_dob_${idx}" value="${escapeHtml(data.date_of_birth)}" /></div>
+        <div><label>Date of birth</label><input type="date" name="m_dob_${idx}" class="dob-input" data-idx="${idx}" data-prefix="add" value="${escapeHtml(data.date_of_birth)}" /></div>
         <div><label>Phone number</label><input type="tel" name="m_phone_${idx}" value="${escapeHtml(data.phone)}" /></div>
         <div><label>Aadhar number</label><input type="text" name="m_aadhar_${idx}" value="${escapeHtml(data.aadhar)}" maxlength="14" /></div>
         <div><label>Job / occupation</label><input type="text" name="m_job_${idx}" value="${escapeHtml(data.job)}" /></div>
         <div><label>Disease / health condition</label><input type="text" name="m_disease_${idx}" value="${escapeHtml(data.disease)}" placeholder="None" /></div>
-        <div><label>Polio vaccine</label>
-          <label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400;margin-top:8px;">
-            <input type="checkbox" name="m_polio_${idx}" style="width:auto;" ${data.polio_given ? "checked" : ""} /> Given
-          </label>
-        </div>
       </div>
       ${pregnancyFieldsHtml(idx, data, "add")}
+      ${immunizationChecklistHtml("add", idx, data.vaccinations, data.other_vaccine_notes)}
     </div>`;
 }
 
@@ -408,6 +541,7 @@ function collectDraftFromForm() {
   const members = [];
   document.querySelectorAll(".member-row").forEach((row) => {
     const idx = row.dataset.idx;
+    const { vaccinations, other_vaccine_notes } = collectVaccinationsFromForm("add", idx);
     members.push({
       name: fd.get(`m_name_${idx}`) || "",
       role: fd.get(`m_role_${idx}`) || "",
@@ -419,7 +553,8 @@ function collectDraftFromForm() {
       disease: fd.get(`m_disease_${idx}`) || "",
       is_pregnant: fd.get(`m_pregnant_${idx}`) === "on",
       pregnancy_start_date: fd.get(`m_preg_start_${idx}`) || "",
-      polio_given: fd.get(`m_polio_${idx}`) === "on",
+      vaccinations,
+      other_vaccine_notes: other_vaccine_notes || "",
     });
   });
   return { family, members };
@@ -499,10 +634,12 @@ function renderAddTab(main) {
     );
     attachRemoveHandlers();
     attachGenderToggle();
+    attachImmunizationToggle();
     scheduleDraftSave();
   });
   attachRemoveHandlers();
   attachGenderToggle();
+  attachImmunizationToggle();
 
   function attachRemoveHandlers() {
     document.querySelectorAll(".remove-member").forEach((btn) => {
@@ -553,6 +690,7 @@ function renderAddTab(main) {
       if (!name) return;
       const gender = fd.get(`m_gender_${idx}`) || null;
       const isPregnant = gender === "Female" && fd.get(`m_pregnant_${idx}`) === "on";
+      const { vaccinations, other_vaccine_notes } = collectVaccinationsFromForm("add", idx);
       memberRows.push({
         family_id: familyId,
         name,
@@ -565,7 +703,8 @@ function renderAddTab(main) {
         disease: fd.get(`m_disease_${idx}`)?.trim() || null,
         is_pregnant: isPregnant,
         pregnancy_start_date: isPregnant ? (fd.get(`m_preg_start_${idx}`) || null) : null,
-        polio_given: fd.get(`m_polio_${idx}`) === "on",
+        vaccinations,
+        other_vaccine_notes,
       });
     });
 
@@ -615,7 +754,8 @@ function getFilteredSortedFamilies() {
         ...members.flatMap((m) => [
           m.name, m.role, m.phone, m.aadhar, m.job, m.disease,
           m.is_pregnant ? `pregnant month ${calcPregnancyMonth(m.pregnancy_start_date) || ""}` : "",
-          m.polio_given ? "polio given vaccinated" : "polio not given pending",
+          (() => { const s = vaccSummary(m.vaccinations); return s.given ? `immunization ${s.given} of ${s.total} vaccines given` : "immunization pending no vaccines given"; })(),
+          m.other_vaccine_notes || "",
         ]),
       ].filter(Boolean).join(" ").toLowerCase();
       if (!haystack.includes(q)) return false;
@@ -760,7 +900,7 @@ function renderFamilyCard(f) {
       <div class="family-body">
         ${members.length ? `
         <table class="member-table">
-          <thead><tr><th>Name</th><th>Role</th><th>Gender</th><th>Age</th><th>Phone</th><th>Aadhar</th><th>Job</th><th>Health condition</th><th>Pregnancy</th><th>Polio</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Role</th><th>Gender</th><th>Age</th><th>Phone</th><th>Aadhar</th><th>Job</th><th>Health condition</th><th>Pregnancy</th><th>Immunization</th><th></th></tr></thead>
           <tbody>
             ${members.map((m) => renderMemberRow(f.id, m)).join("")}
           </tbody>
@@ -780,7 +920,7 @@ function renderMemberRow(familyId, m) {
             <div><label>Name</label><input type="text" class="em-name" value="${escapeHtml(m.name)}" /></div>
             <div><label>Role</label><select class="em-role">${ROLE_OPTIONS.map((r) => `<option ${m.role === r ? "selected" : ""}>${r}</option>`).join("")}</select></div>
             <div><label>Gender</label><select class="em-gender"><option value="">—</option>${GENDER_OPTIONS.map((g) => `<option ${m.gender === g ? "selected" : ""}>${g}</option>`).join("")}</select></div>
-            <div><label>Date of birth</label><input type="date" class="em-dob" value="${escapeHtml(m.date_of_birth)}" /></div>
+            <div><label>Date of birth</label><input type="date" class="em-dob dob-input" data-idx="${m.id}" data-prefix="em" value="${escapeHtml(m.date_of_birth)}" /></div>
             <div><label>Phone</label><input type="tel" class="em-phone" value="${escapeHtml(m.phone)}" /></div>
             <div><label>Aadhar</label><input type="text" class="em-aadhar" value="${escapeHtml(m.aadhar)}" /></div>
             <div><label>Job</label><input type="text" class="em-job" value="${escapeHtml(m.job)}" /></div>
@@ -788,16 +928,19 @@ function renderMemberRow(familyId, m) {
             <div><label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400;"><input type="checkbox" class="em-pregnant" ${m.is_pregnant ? "checked" : ""} style="width:auto;" /> Currently pregnant</label></div>
             <div><label>Pregnancy start date (LMP)</label><input type="date" class="em-preg-start" value="${escapeHtml(m.pregnancy_start_date)}" /></div>
             <div><label>Month (auto)</label><input type="text" class="em-preg-month-display" value="${calcPregnancyMonth(m.pregnancy_start_date) ?? "—"}" disabled style="background:var(--surface-2);color:var(--ink-soft);" /></div>
-            <div><label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400;"><input type="checkbox" class="em-polio" ${m.polio_given ? "checked" : ""} style="width:auto;" /> Polio vaccine given</label></div>
           </div>
-          <button class="btn btn-primary btn-sm save-member" data-family="${familyId}" data-member="${m.id}">Save</button>
+          ${immunizationChecklistHtml("em", m.id, m.vaccinations, m.other_vaccine_notes)}
+          <button class="btn btn-primary btn-sm save-member" data-family="${familyId}" data-member="${m.id}" style="margin-top:10px;">Save</button>
           <button class="btn btn-ghost btn-sm cancel-edit-member">Cancel</button>
         </td>
       </tr>`;
   }
   const hasDisease = m.disease && m.disease.trim() && m.disease.trim().toLowerCase() !== "none";
+  const ageYears = calcAge(m.date_of_birth);
   const ageDisplay = formatAgeDisplay(m.date_of_birth);
   const pregMonth = m.is_pregnant ? calcPregnancyMonth(m.pregnancy_start_date) : null;
+  const isMinor = ageYears !== null && ageYears < 18;
+  const { given, total } = vaccSummary(m.vaccinations);
   return `
     <tr>
       <td>${escapeHtml(m.name)}</td>
@@ -809,7 +952,7 @@ function renderMemberRow(familyId, m) {
       <td>${escapeHtml(m.job) || "—"}</td>
       <td>${hasDisease ? `<span class="disease-flag">${escapeHtml(m.disease)}</span>` : "—"}</td>
       <td>${m.is_pregnant ? `<span class="badge badge-pregnant">Pregnant · Month ${pregMonth ?? "—"}</span>` : "—"}</td>
-      <td style="text-align:center;">${m.polio_given ? `<span class="polio-tick" title="Polio vaccine given">✓</span>` : `<span class="polio-cross" title="Polio vaccine not given">✗</span>`}</td>
+      <td>${isMinor ? `<span class="badge ${given === total ? "badge-head" : "badge-member"}">${given}/${total} <span class="${given === total ? "polio-tick" : "polio-cross"}">${given === total ? "✓" : "✗"}</span></span>` : "—"}</td>
       <td class="member-actions">
         <button class="btn btn-ghost btn-sm edit-member" data-family="${familyId}" data-member="${m.id}">Edit</button>
         <button class="btn btn-danger btn-sm delete-member" data-family="${familyId}" data-member="${m.id}">Delete</button>
@@ -827,7 +970,7 @@ function renderAddMemberInline(familyId) {
         <div><label>Full name *</label><input type="text" id="nm-name" /></div>
         <div><label>Role</label><select id="nm-role">${ROLE_OPTIONS.map((r) => `<option>${r}</option>`).join("")}</select></div>
         <div><label>Gender</label><select id="nm-gender"><option value="">—</option>${GENDER_OPTIONS.map((g) => `<option>${g}</option>`).join("")}</select></div>
-        <div><label>Date of birth</label><input type="date" id="nm-dob" /></div>
+        <div><label>Date of birth</label><input type="date" id="nm-dob" class="dob-input" data-idx="new" data-prefix="nm" /></div>
         <div><label>Phone</label><input type="tel" id="nm-phone" /></div>
         <div><label>Aadhar</label><input type="text" id="nm-aadhar" /></div>
         <div><label>Job</label><input type="text" id="nm-job" /></div>
@@ -835,8 +978,8 @@ function renderAddMemberInline(familyId) {
         <div><label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400;"><input type="checkbox" id="nm-pregnant" style="width:auto;" /> Currently pregnant</label></div>
         <div><label>Pregnancy start date (LMP)</label><input type="date" id="nm-preg-start" /></div>
         <div><label>Month (auto)</label><input type="text" id="nm-preg-month-display" disabled style="background:var(--surface-2);color:var(--ink-soft);" /></div>
-        <div><label style="display:flex;align-items:center;gap:6px;text-transform:none;font-weight:400;"><input type="checkbox" id="nm-polio" style="width:auto;" /> Polio vaccine given</label></div>
       </div>
+      ${immunizationChecklistHtml("nm", "new", {}, "")}
       <div style="margin-top:10px;display:flex;gap:8px;">
         <button class="btn btn-primary btn-sm save-new-member" data-family="${familyId}">Save member</button>
         <button class="btn btn-ghost btn-sm cancel-new-member">Cancel</button>
@@ -884,6 +1027,7 @@ function attachFamilyCardHandlers(main) {
   document.querySelectorAll(".save-member").forEach((b) => b.addEventListener("click", async () => {
     const row = b.closest("tr");
     const isPregnant = row.querySelector(".em-pregnant").checked;
+    const { vaccinations, other_vaccine_notes } = collectVaccinationsFromForm("em", b.dataset.member);
     const payload = {
       name: row.querySelector(".em-name").value.trim(),
       role: row.querySelector(".em-role").value,
@@ -895,7 +1039,8 @@ function attachFamilyCardHandlers(main) {
       disease: row.querySelector(".em-disease").value.trim() || null,
       is_pregnant: isPregnant,
       pregnancy_start_date: isPregnant ? (row.querySelector(".em-preg-start").value || null) : null,
-      polio_given: row.querySelector(".em-polio").checked,
+      vaccinations,
+      other_vaccine_notes,
       updated_at: new Date().toISOString(),
     };
     const { error } = await sb.from("members").update(payload).eq("id", b.dataset.member);
@@ -922,6 +1067,7 @@ function attachFamilyCardHandlers(main) {
     const name = document.getElementById("nm-name").value.trim();
     if (!name) { toast("Name is required."); return; }
     const isPregnant = document.getElementById("nm-pregnant").checked;
+    const { vaccinations, other_vaccine_notes } = collectVaccinationsFromForm("nm", "new");
     const payload = {
       family_id: b.dataset.family,
       name,
@@ -934,7 +1080,8 @@ function attachFamilyCardHandlers(main) {
       disease: document.getElementById("nm-disease").value.trim() || null,
       is_pregnant: isPregnant,
       pregnancy_start_date: isPregnant ? (document.getElementById("nm-preg-start").value || null) : null,
-      polio_given: document.getElementById("nm-polio").checked,
+      vaccinations,
+      other_vaccine_notes,
     };
     const { error } = await sb.from("members").insert(payload);
     if (error) { toast("Error: " + error.message); return; }
@@ -952,6 +1099,8 @@ function attachFamilyCardHandlers(main) {
   if (nmPreg) nmPreg.addEventListener("input", () => {
     document.getElementById("nm-preg-month-display").value = calcPregnancyMonth(nmPreg.value) ?? "—";
   });
+
+  attachImmunizationToggle();
 }
 
 // ------------------------------------------------------------
@@ -984,17 +1133,20 @@ function downloadPdf(filename, title, rows) {
   const head = [[
     "House No", "House Name", "Area", "Address", "Member Name", "Role", "Gender",
     "Date of Birth", "Age", "Phone", "Aadhar", "Job", "Health Condition",
-    "Pregnant", "Preg. Start Date", "Preg. Month", "Polio",
+    "Pregnant", "Preg. Start Date", "Preg. Month", "Immunization (under 18)",
   ]];
   const body = rows.map(({ f, m }) => {
     const ageDisplay = formatAgeDisplay(m.date_of_birth);
     const pregMonth = m.is_pregnant ? calcPregnancyMonth(m.pregnancy_start_date) : "";
+    const ageYears = calcAge(m.date_of_birth);
+    const isMinor = ageYears !== null && ageYears < 18;
+    const { given, total } = vaccSummary(m.vaccinations);
     return [
       f.house_no || "", f.house_name || "", f.area || "", f.address || "",
       m.name || "", m.role || "", m.gender || "",
       m.date_of_birth || "", ageDisplay ?? "", m.phone || "", m.aadhar || "", m.job || "",
       m.disease || "", m.is_pregnant ? "Yes" : "", m.pregnancy_start_date || "", pregMonth ?? "",
-      m.name ? (m.polio_given ? "✓" : "✗") : "",
+      m.name ? (isMinor ? `${given}/${total}` : "n/a (18+)") : "",
     ];
   });
 
@@ -1064,6 +1216,11 @@ function renderExportTab(main) {
         <button class="btn btn-teal btn-sm" id="exp-pregnant">Download PDF</button>
       </div>
       <div class="export-tile">
+        <h4>Immunization chart (children under 18)</h4>
+        <p>One row per child, one column per vaccine — tick if given, cross if not. Matches the standard schedule chart.</p>
+        <button class="btn btn-teal btn-sm" id="exp-immunization">Download PDF</button>
+      </div>
+      <div class="export-tile">
         <h4>Everything (raw)</h4>
         <p>Full unfiltered dataset, in current view order.</p>
         <button class="btn btn-primary btn-sm" id="exp-all">Download PDF</button>
@@ -1125,9 +1282,55 @@ function renderExportTab(main) {
     });
     downloadPdf("pregnant_women.pdf", "Pregnant Women", rows);
   });
+  document.getElementById("exp-immunization").addEventListener("click", () => {
+    const rows = [];
+    state.families.forEach((f) => {
+      (state.membersByFamily[f.id] || []).forEach((m) => {
+        const age = calcAge(m.date_of_birth);
+        if (age !== null && age < 18) rows.push({ f, m });
+      });
+    });
+    downloadImmunizationPdf("immunization_chart.pdf", rows);
+  });
   document.getElementById("exp-all").addEventListener("click", () => {
     downloadPdf("all_records.pdf", "All Records", buildRows(state.families));
   });
+}
+
+function downloadImmunizationPdf(filename, rows) {
+  if (!window.jspdf) { toast("PDF library failed to load — check your internet connection and reload."); return; }
+  if (!rows.length) { toast("No children under 18 found to include."); return; }
+  const { jsPDF } = window.jspdf;
+  // Custom wide page so all vaccine columns fit at a readable size.
+  const doc = new jsPDF({ orientation: "landscape", unit: "pt", format: [2200, 900] });
+
+  doc.setFontSize(16);
+  doc.text("Immunization Chart — Children Under 18", 30, 30);
+  doc.setFontSize(9);
+  doc.setTextColor(120);
+  doc.text(`Generated ${new Date().toLocaleString()} · ${rows.length} child(ren) · ✓ = given, ✗ = not given`, 30, 46);
+
+  const head = [[
+    "House No", "House Name", "Child Name", "Age", "Gender",
+    ...VACCINE_SCHEDULE.map((v) => v.label),
+    "Other / SIA",
+  ]];
+  const body = rows.map(({ f, m }) => [
+    f.house_no || "", f.house_name || "", m.name || "", formatAgeDisplay(m.date_of_birth) ?? "", m.gender || "",
+    ...VACCINE_SCHEDULE.map((v) => ((m.vaccinations || {})[v.key] ? "✓" : "✗")),
+    m.other_vaccine_notes || "",
+  ]);
+
+  doc.autoTable({
+    head, body,
+    startY: 58,
+    styles: { fontSize: 6, cellPadding: 2.5 },
+    headStyles: { fillColor: [163, 21, 86], fontSize: 5.5 },
+    theme: "grid",
+    margin: { left: 20, right: 20 },
+  });
+
+  doc.save(filename);
 }
 
 init();
