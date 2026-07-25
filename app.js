@@ -233,8 +233,8 @@ function renderLogin(mode = "login", errorMsg = "", successMsg = "") {
     login: "Sign in to your account. Your records are private to you and never shared with other accounts.",
     signup: "Create your own free account. Everything you add will be visible only to you.",
     forgot: "Enter your email and we'll send you a password reset link.",
-    otp: "Enter your email and we'll send you a one-time code — no password needed.",
-    otp_verify: "Enter the 6-digit code we just emailed you.",
+    otp: "Enter your email and we'll send you a sign-in email — no password needed.",
+    otp_verify: "Check your email — click the sign-in link and you'll be logged in automatically. (If your email instead shows a 6-digit code, you can type it in below.)",
   };
   root.innerHTML = `
     <div class="center-screen">
@@ -253,10 +253,11 @@ function renderLogin(mode = "login", errorMsg = "", successMsg = "") {
 
         ${mode === "otp_verify" ? `
         <form id="auth-form">
-          <div class="field"><label>6-digit code</label>
-            <input type="text" id="auth-otp-code" inputmode="numeric" pattern="[0-9]*" maxlength="6" required autocomplete="one-time-code" />
+          <div class="field"><label>6-digit code (only if your email shows one)</label>
+            <input type="text" id="auth-otp-code" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code" />
           </div>
-          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;">Verify &amp; sign in</button>
+          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;">Verify code</button>
+          <p style="font-size:0.78rem;color:var(--ink-soft);margin-top:10px;text-align:center;">Prefer not to type a code? Just click the "Sign in" link in the email instead — this page will update on its own once you do.</p>
           ${errorMsg ? `<p class="auth-error">${escapeHtml(errorMsg)}</p>` : ""}
         </form>
         <div class="auth-toggle"><button id="to-login">Back to sign in</button></div>
@@ -314,6 +315,7 @@ function renderLogin(mode = "login", errorMsg = "", successMsg = "") {
 
     if (mode === "otp_verify") {
       const code = document.getElementById("auth-otp-code").value.trim();
+      if (!code) { renderLogin("otp_verify", "Enter the code from your email, or just click the sign-in link in that email instead."); return; }
       const { error } = await sb.auth.verifyOtp({ email: pendingOtpEmail, token: code, type: "email" });
       if (error) renderLogin("otp_verify", error.message);
       return;
