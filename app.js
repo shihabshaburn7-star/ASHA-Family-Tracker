@@ -6,6 +6,7 @@
 const root = document.getElementById("root");
 let sb = null;
 let session = null;
+let pendingOtpEmail = null;
 
 const state = {
   tab: "add",
@@ -192,19 +193,22 @@ function init() {
   });
 
   sb.auth.onAuthStateChange((event, newSession) => {
-    session = newSession;
     if (event === "SIGNED_OUT") {
+      clearCache(); // uses the still-current `session` to find the right key
+      session = null;
       dataLoaded = false;
-      clearCache();
       renderLogin();
-    } else if (event === "SIGNED_IN" && !dataLoaded) {
-      // Only reload on a genuine new sign-in, not on background token
-      // refreshes that fire when the tab regains focus.
-      dataLoaded = true;
-      loadData();
+    } else {
+      session = newSession;
+      if (event === "SIGNED_IN" && !dataLoaded) {
+        // Only reload on a genuine new sign-in, not on background token
+        // refreshes that fire when the tab regains focus.
+        dataLoaded = true;
+        loadData();
+      }
+      // TOKEN_REFRESHED / USER_UPDATED / INITIAL_SESSION etc. are ignored
+      // here on purpose — the session variable above is still kept fresh.
     }
-    // TOKEN_REFRESHED / USER_UPDATED / INITIAL_SESSION etc. are ignored
-    // here on purpose — the session variable above is still kept fresh.
   });
 }
 
@@ -224,75 +228,171 @@ function renderSetupNeeded() {
 // ------------------------------------------------------------
 // AUTH SCREENS
 // ------------------------------------------------------------
-function renderLogin(mode = "login", errorMsg = "") {
+function renderLogin(mode = "login", errorMsg = "", successMsg = "") {
+  const titles = {
+    login: "Sign in to your account. Your records are private to you and never shared with other accounts.",
+    signup: "Create your own free account. Everything you add will be visible only to you.",
+    forgot: "Enter your email and we'll send you a password reset link.",
+    otp: "Enter your email and we'll send you a one-time code — no password needed.",
+    otp_verify: "Enter the 6-digit code we just emailed you.",
+  };
   root.innerHTML = `
     <div class="center-screen">
       <div class="auth-card">
-        <h1>ASHA Family Tracker</h1>
-        <p class="sub">${mode === "login" ? "Sign in to view and manage your ward's records." : "Create an account to get started."}</p>
+        <h1>Family Records Tracker</h1>
+        <p class="sub">${titles[mode]}</p>
+
+        ${mode === "login" || mode === "signup" ? `
+        <button type="button" id="google-btn" class="btn btn-ghost" style="width:100%;justify-content:center;gap:8px;margin-bottom:14px;">
+          <svg width="16" height="16" viewBox="0 0 48 48"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3c-1.6 4.6-6 8-11.3 8-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.1 8 3l6-6C34 5.1 29.3 3 24 3 12.4 3 3 12.4 3 24s9.4 21 21 21 21-9.4 21-21c0-1.4-.1-2.5-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.5 16 18.9 13 24 13c3.1 0 5.8 1.1 8 3l6-6C34 5.1 29.3 3 24 3c-7.6 0-14.1 4.3-17.7 11.7z"/><path fill="#4CAF50" d="M24 45c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 36.4 26.7 37 24 37c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.8 40.6 16.3 45 24 45z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.2 4.3-4.1 5.7l6.2 5.2C40.9 36 44 30.5 44 24c0-1.4-.1-2.5-.4-3.5z"/></svg>
+          Continue with Google
+        </button>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;color:var(--ink-soft);font-size:0.78rem;">
+          <div style="flex:1;height:1px;background:var(--line);"></div>OR<div style="flex:1;height:1px;background:var(--line);"></div>
+        </div>` : ""}
+
+        ${mode === "otp_verify" ? `
+        <form id="auth-form">
+          <div class="field"><label>6-digit code</label>
+            <input type="text" id="auth-otp-code" inputmode="numeric" pattern="[0-9]*" maxlength="6" required autocomplete="one-time-code" />
+          </div>
+          <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;">Verify &amp; sign in</button>
+          ${errorMsg ? `<p class="auth-error">${escapeHtml(errorMsg)}</p>` : ""}
+        </form>
+        <div class="auth-toggle"><button id="to-login">Back to sign in</button></div>
+        ` : `
         <form id="auth-form">
           <div class="field">
             <label>Email</label>
             <input type="email" id="auth-email" required />
           </div>
+          ${mode !== "forgot" && mode !== "otp" ? `
           <div class="field">
             <label>Password</label>
-            <input type="password" id="auth-password" required minlength="6" />
-          </div>
+            <input type="password" id="auth-password" required minlength="8" autocomplete="${mode === "signup" ? "new-password" : "current-password"}" />
+            ${mode === "signup" ? `<p style="font-size:0.75rem;color:var(--ink-soft);margin:4px 0 0;">At least 8 characters.</p>` : ""}
+          </div>` : ""}
+          ${mode === "signup" ? `
+          <div class="field">
+            <label>Confirm password</label>
+            <input type="password" id="auth-password-confirm" required minlength="8" autocomplete="new-password" />
+          </div>` : ""}
           <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;">
-            ${mode === "login" ? "Sign in" : "Create account"}
+            ${mode === "login" ? "Sign in" : mode === "signup" ? "Create account" : mode === "otp" ? "Send code" : "Send reset link"}
           </button>
           ${errorMsg ? `<p class="auth-error">${escapeHtml(errorMsg)}</p>` : ""}
+          ${successMsg ? `<p style="color:var(--teal);font-size:0.85rem;margin-top:8px;">${escapeHtml(successMsg)}</p>` : ""}
         </form>
         <div class="auth-toggle">
-          ${mode === "login"
-            ? `New here? <button id="to-signup">Create an account</button>`
-            : `Already have an account? <button id="to-login">Sign in</button>`}
+          ${mode === "login" ? `
+            New here? <button id="to-signup">Create an account</button><br/>
+            <button id="to-otp" style="margin-top:8px;">Sign in with a one-time code</button><br/>
+            <button id="to-forgot" style="margin-top:8px;">Forgot your password?</button>
+          ` : mode === "signup" ? `
+            Already have an account? <button id="to-login">Sign in</button>
+          ` : mode === "otp" ? `
+            <button id="to-login">Use password instead</button>
+          ` : `
+            <button id="to-login">Back to sign in</button>
+          `}
         </div>
+        `}
       </div>
     </div>`;
 
+  const googleBtn = document.getElementById("google-btn");
+  if (googleBtn) googleBtn.addEventListener("click", async () => {
+    const { error } = await sb.auth.signInWithOAuth({
+      provider: "google",
+      options: { redirectTo: window.location.href.split("#")[0].split("?")[0] },
+    });
+    if (error) renderLogin(mode, error.message);
+  });
+
   document.getElementById("auth-form").addEventListener("submit", async (e) => {
     e.preventDefault();
+
+    if (mode === "otp_verify") {
+      const code = document.getElementById("auth-otp-code").value.trim();
+      const { error } = await sb.auth.verifyOtp({ email: pendingOtpEmail, token: code, type: "email" });
+      if (error) renderLogin("otp_verify", error.message);
+      return;
+    }
+
     const email = document.getElementById("auth-email").value.trim();
+
+    if (mode === "forgot") {
+      const { error } = await sb.auth.resetPasswordForEmail(email);
+      if (error) renderLogin("forgot", error.message);
+      else renderLogin("login", "", "If an account exists for that email, a reset link has been sent.");
+      return;
+    }
+
+    if (mode === "otp") {
+      const { error } = await sb.auth.signInWithOtp({ email });
+      if (error) { renderLogin("otp", error.message); return; }
+      pendingOtpEmail = email;
+      renderLogin("otp_verify", "", "");
+      return;
+    }
+
     const password = document.getElementById("auth-password").value;
-    if (mode === "login") {
-      const { error } = await sb.auth.signInWithPassword({ email, password });
-      if (error) renderLogin("login", error.message);
-    } else {
+
+    if (mode === "signup") {
+      const confirm = document.getElementById("auth-password-confirm").value;
+      if (password !== confirm) { renderLogin("signup", "Passwords don't match."); return; }
       const { error } = await sb.auth.signUp({ email, password });
       if (error) renderLogin("signup", error.message);
-      else renderLogin("login", "Account created. If email confirmation is on, check your inbox, then sign in.");
+      else renderLogin("login", "", "Account created. If email confirmation is turned on for this project, check your inbox before signing in.");
+      return;
     }
+
+    // login
+    const { error } = await sb.auth.signInWithPassword({ email, password });
+    if (error) renderLogin("login", error.message);
   });
 
   const toSignup = document.getElementById("to-signup");
   const toLogin = document.getElementById("to-login");
+  const toForgot = document.getElementById("to-forgot");
+  const toOtp = document.getElementById("to-otp");
   if (toSignup) toSignup.addEventListener("click", () => renderLogin("signup"));
   if (toLogin) toLogin.addEventListener("click", () => renderLogin("login"));
+  if (toForgot) toForgot.addEventListener("click", () => renderLogin("forgot"));
+  if (toOtp) toOtp.addEventListener("click", () => renderLogin("otp"));
 }
 
 // ------------------------------------------------------------
 // DATA LOADING (with local cache for instant, no-flash reloads)
 // ------------------------------------------------------------
-const CACHE_KEY = "asha_tracker_cache_v1";
+// Cache key includes the user's own ID, so if two different people sign
+// in on the same device/browser, one person's cached data can never be
+// shown to the other — each account's cache is completely separate.
+function cacheKey() {
+  return session && session.user ? `asha_tracker_cache_v1_${session.user.id}` : null;
+}
 
 function saveCache(families, members) {
+  const key = cacheKey();
+  if (!key) return;
   try {
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ families, members, cachedAt: Date.now() }));
+    localStorage.setItem(key, JSON.stringify({ families, members, cachedAt: Date.now() }));
   } catch (e) { /* storage full or unavailable — safe to ignore, cache is optional */ }
 }
 
 function readCache() {
+  const key = cacheKey();
+  if (!key) return null;
   try {
-    const raw = localStorage.getItem(CACHE_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return null;
     return JSON.parse(raw);
   } catch (e) { return null; }
 }
 
 function clearCache() {
-  try { localStorage.removeItem(CACHE_KEY); } catch (e) { /* ignore */ }
+  const key = cacheKey();
+  if (key) { try { localStorage.removeItem(key); } catch (e) { /* ignore */ } }
 }
 
 function applyData(families, members) {
@@ -371,12 +471,13 @@ function renderShell() {
   root.innerHTML = `
     <div class="app-shell">
       <div class="sidebar">
-        <div class="brand">ASHA Tracker<small>Household &amp; member records</small></div>
+        <div class="brand">Family Records<small>Household &amp; member tracker</small></div>
         <button class="nav-btn" data-tab="add">＋ Add family</button>
         <button class="nav-btn" data-tab="view">🔍 View &amp; manage</button>
         <button class="nav-btn" data-tab="export">⬇ Export data</button>
         <div class="sidebar-footer">
-          <div style="margin-bottom:8px;">${escapeHtml(session?.user?.email || "")}</div>
+          <div style="margin-bottom:2px;">${escapeHtml(session?.user?.email || "")}</div>
+          <div style="font-size:0.72rem;color:rgba(255,255,255,0.5);margin-bottom:8px;">🔒 Private to this account</div>
           <button id="logout-btn">Sign out</button>
         </div>
       </div>
@@ -674,6 +775,7 @@ function renderAddTab(main) {
       area: fd.get("area")?.trim(),
       address: fd.get("address")?.trim() || null,
       description: fd.get("description")?.trim() || null,
+      user_id: session.user.id,
     };
 
     const { data: famRows, error: famErr } = await sb
